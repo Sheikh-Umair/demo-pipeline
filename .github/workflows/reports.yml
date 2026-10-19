@@ -1,0 +1,120 @@
+name: Reports
+
+# Report-only workflow: it NEVER blocks a merge and NEVER touches the server.
+# Purpose: generate numbers (security, quality, speed) on every PR / push / weekly, so we can see
+# where the code stands and what to improve next. Your current droplet deploy stays exactly as it is.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1'     # every Monday 03:00 UTC, full baseline
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep
+        run: |
+          pip install semgrep
+          start=$(date +%s)
+          semgrep scan --config p/default --config p/secrets --config p/typescript --config p/javascript \
+            --exclude node_modules --exclude .next --exclude dist --exclude build \
+            --json --output semgrep.json || true
+          echo "$(( $(date +%s) - start ))" > semgrep.secs
+      - name: Numbers
+        run: |
+          {
+            echo "## Semgrep (code security)"
+            echo "| Severity | Count |"; echo "|---|---|"
+            jq -r '[.results[].extra.severity] | group_by(.) | map("| \(.[0]) | \(length) |") | .[]' semgrep.json
+            echo
+            echo "Total: $(jq '.results | length' semgrep.json) findings in $(cat semgrep.secs)s"
+            echo
+            echo "Top rules:"
+            jq -r '[.results[].check_id] | group_by(.) | map({r:.[0],n:length}) | sort_by(-.n) | .[0:5][] | "- \(.r): \(.n)"' semgrep.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: semgrep-report, path: "semgrep.json" }
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin to the latest release tag or commit SHA before relying on this.
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          format: json
+          output: trivy.json
+          exit-code: '0'
+      - name: Numbers
+        run: |
+          {
+            echo "## Trivy (dependencies, secrets, misconfig)"
+            echo "| Severity | Vulnerable packages |"; echo "|---|---|"
+            jq -r '[.Results[]? | .Vulnerabilities[]? | .Severity] | group_by(.) | map("| \(.[0]) | \(length) |") | .[]' trivy.json
+            echo
+            echo "Secrets found: $(jq '[.Results[]? | .Secrets[]?] | length' trivy.json)"
+            echo
+            echo "Fixable HIGH/CRITICAL: $(jq '[.Results[]? | .Vulnerabilities[]? | select((.Severity=="HIGH" or .Severity=="CRITICAL") and .FixedVersion != null)] | length' trivy.json)"
+            echo
+            echo "Worst packages:"
+            jq -r '[.Results[]? | .Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | .PkgName] | group_by(.) | map({p:.[0],n:length}) | sort_by(-.n) | .[0:5][] | "- \(.p): \(.n)"' trivy.json
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: trivy-report, path: "trivy.json" }
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Collect
+        run: |
+          s=$(date +%s)
+          npx eslint . -f json -o eslint.json || true
+          echo "eslint $(( $(date +%s) - s ))s" > times.txt
+          s=$(date +%s)
+          npx tsc --noEmit > tsc.txt 2>&1 || true
+          echo "tsc $(( $(date +%s) - s ))s" >> times.txt
+          s=$(date +%s)
+          (npm test --if-present > test.txt 2>&1 && echo pass > test.status) || echo fail > test.status
+          echo "tests $(( $(date +%s) - s ))s" >> times.txt
+          s=$(date +%s)
+          npm run build > build.txt 2>&1 && echo pass > build.status || echo fail > build.status
+          echo "build $(( $(date +%s) - s ))s" >> times.txt
+          npm audit --json > audit.json 2>/dev/null || true
+      - name: Numbers
+        run: |
+          {
+            echo "## Quality and speed"
+            echo "| Metric | Value |"; echo "|---|---|"
+            echo "| ESLint errors | $(jq '[.[].errorCount] | add // 0' eslint.json 2>/dev/null || echo n/a) |"
+            echo "| ESLint warnings | $(jq '[.[].warningCount] | add // 0' eslint.json 2>/dev/null || echo n/a) |"
+            echo "| TypeScript errors | $(grep -c 'error TS' tsc.txt || true) |"
+            echo "| Tests | $(cat test.status) |"
+            echo "| Build | $(cat build.status) |"
+            echo "| npm audit high+critical | $(jq '(.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' audit.json 2>/dev/null || echo n/a) |"
+            echo
+            echo "Step times: $(tr '\n' ' ' < times.txt)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quality-report
+          path: |
+            eslint.json
+            tsc.txt
+            test.txt
+            build.txt
+            audit.json
+            times.txt

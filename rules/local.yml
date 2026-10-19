@@ -1,0 +1,11 @@
+rules:
+  - id: js-eval-injection
+    languages: [javascript]
+    severity: ERROR
+    message: eval() on user input allows code injection
+    pattern: eval(...)
+  - id: hardcoded-aws-key
+    languages: [javascript]
+    severity: ERROR
+    message: Hardcoded AWS access key
+    pattern-regex: AKIA[0-9A-Z]{16}

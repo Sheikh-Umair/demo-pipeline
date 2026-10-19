@@ -1,0 +1,13 @@
+{
+  "name": "demo-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"console.log('build ok')\"",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "lodash": "4.17.15",
+    "minimist": "1.2.0"
+  }
+}
